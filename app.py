@@ -121,29 +121,75 @@ def upload_model():
 
 @app.route('/predict/<string:model_name>', methods=['POST'])
 def predict(model_name):
-    # (Esta función no cambia)
+    """Endpoint para ejecutar una predicción (Versión Robusta)"""
+    
+    # 1. Cargar el modelo y los metadatos (sin cambios)
     model_sess = get_model(model_name.lower())
-    if model_sess is None: return jsonify({'error': f"Modelo ONNX '{model_name}' no encontrado."}), 404
+    if model_sess is None:
+        return jsonify({'error': f"Modelo ONNX '{model_name}' no encontrado o no se pudo cargar."}), 404
+
     metadata = get_metadata(model_name.lower())
-    if metadata is None: return jsonify({'error': f"Metadatos para '{model_name}' no encontrados."}), 404
+    if metadata is None:
+        return jsonify({'error': f"Metadatos para '{model_name}' no encontrados."}), 404
+
     try:
-        data = request.json; features_list = data['features']
+        # 2. Preparar el DataFrame (sin cambios)
+        data = request.json
+        features_list = data['features']
+        
+        # Obtenemos los nombres de las columnas de los metadatos
         column_names = [f['name'] for f in metadata['input_features']]
-        if len(features_list) != len(column_names): return jsonify({'error': f"Discrepancia de features."}), 400
+        
+        if len(features_list) != len(column_names):
+            return jsonify({'error': f"Discrepancia de features. El modelo espera {len(column_names)} pero recibió {len(features_list)}."}), 400
+
         df = pd.DataFrame([features_list], columns=column_names)
+
+        # --- 3. ¡LA LÓGICA CORREGIDA! ---
+        # No confiamos en los nombres del ONNX, confiamos en el ORDEN.
+        
         onnx_input = {}
-        input_info = model_sess.get_inputs()
-        for i, input_node in enumerate(input_info):
-            col_name = input_node.name; col_data = df[col_name].values
-            if input_node.type == 'tensor(string)': onnx_input[col_name] = col_data.reshape(-1, 1).astype(object)
-            else: onnx_input[col_name] = col_data.astype(np.float32).reshape(-1, 1)
+        onnx_input_nodes = model_sess.get_inputs() # Los inputs REALES del ONNX
+        
+        # Asumimos que el orden de 'input_features' (metadata) 
+        # y 'onnx_input_nodes' (modelo) es el mismo.
+        
+        if len(column_names) != len(onnx_input_nodes):
+            return jsonify({'error': f"Discrepancia de features entre metadata ({len(column_names)}) y modelo ONNX ({len(onnx_input_nodes)})."}), 500
+
+        for i, onnx_node in enumerate(onnx_input_nodes):
+            
+            # El nombre real que ONNX espera (ej. 'float_input_0')
+            onnx_name = onnx_node.name 
+            
+            # El nombre de la columna de usuario (ej. 'metacritic')
+            meta_name = column_names[i] 
+            
+            # Obtener los datos del DataFrame usando el nombre de la metadata
+            col_data = df[meta_name].values
+            
+            # Convertir al tipo de dato que ONNX espera
+            if onnx_node.type == 'tensor(string)':
+                onnx_input[onnx_name] = col_data.reshape(-1, 1).astype(object)
+            else:
+                # Asumir que todo lo demás es numérico y convertir a float32
+                onnx_input[onnx_name] = col_data.astype(np.float32).reshape(-1, 1)
+
+        # 4. Ejecutar la predicción (sin cambios)
         output_name = model_sess.get_outputs()[0].name
         prediction_onnx = model_sess.run([output_name], onnx_input)
         prediction = prediction_onnx[0] 
-        return jsonify({'model_used': model_name, 'prediction': prediction.tolist()})
+        
+        return jsonify({
+            'model_used': model_name.lower(),
+            'prediction': prediction.tolist()
+        })
+        
     except Exception as e:
-        print(traceback.format_exc()); return jsonify({'error': f'Error en la predicción: {str(e)}'}), 500
-
+        print(traceback.format_exc()) # Imprime el error real (KeyError, etc.)
+        return jsonify({'error': f'Error en la predicción ONNX: {str(e)}'}), 500
+    
+    
 @app.route('/models', methods=['GET'])
 def list_models():
     # (Esta función no cambia)
